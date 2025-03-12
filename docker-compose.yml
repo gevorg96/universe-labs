@@ -1,0 +1,33 @@
+﻿services:
+  service:
+    image: universe_labs
+    build:
+      context: .
+      dockerfile: UniverseLabs.Oms/Dockerfile
+
+
+  postgres:
+    image: postgres
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=mypassword
+      - POSTGRES_DB=postgres
+      - POSTGRES_HOST_AUTH_METHOD=md5
+      - POSTGRES_INITDB_ARGS=--auth=md5
+    volumes:
+      - pgdata:/var/lib/postgresql/data/
+      - ./initdb.d:/docker-entrypoint-initdb.d
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=user
+      - DB_PASSWORD=mypassword
+      - ADMIN_USERS=postgres,admin
+    ports:
+      - "15432:5432"
+
+volumes:
+  pgdata:

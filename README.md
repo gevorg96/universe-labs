@@ -1025,7 +1025,9 @@ public class OrderController(OrderService orderService): ControllerBase
 ```
 
 35) Наш микросервис почти готов! На данный момент ваша структура проектов должна выглядеть следующим образом:
-[![solution.png](solution.png)]
+
+![solution.png](solution.png)
+
 Зайдем в файл launchSettings.json в папке Properties и настроим условия запуска проекта:
 ```json
 {

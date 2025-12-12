@@ -1,398 +1,242 @@
-# Лаба 5
-### Apache Грефневая Kafka
+# Лаба 6
+### Apache Kafka
 
 > Введение
 
-А теперь мы будем делать настоящий продакшн, ибо RabbitMQ уже много где заменили на Kafka.
-Почему? Потому что Kafka - это крутое решение, которое позволяет обрабатывать огромное количество сообщений в реальном времени.
-Чего не сказать про RabbitMQ, ибо под 100 000 RPS кролик складывается.
+По прошлой лабе мы поняли, что кафка в целом производительнее чем кролик (если вы написали батчевый консьюмер для неё).
+Однако устойчивость системы необходимо закладывать самому.
+В частности выключение автокоммитов, ретраи, DLQ и прочее необходимо реализовать в вашем приложении,
+поддержки такого функционала в кафке нет.
 
-> #### Оффтоп для мальчиков
-Представьте, что у вас BMW M Competition (напичканный электроникой для упрощения вождения),
-в которой из коробки идет выравнивание по полосе, панель управления, круиз контроль,
-разгон до 100км/ч за 4 секунды и остальные достижения современного автомобилестроения.
+На самом деле понятие DLQ вообще не существует для кафки, вы просто создаете такую же очередь, как и ваша,
+только в название дописывается постфикс `***_error`.
+Никакого роутинга и биндинга тут в помине нет. Вы сами должны пушить событие при неудачной обработке.
 
-Так вот. Пересаживание с RabbitMQ на Kafka - это то же самое, как пересесть
-с бмв на батину бэху, которая старше вас и в которой из электрического только дворники и магнитола.
+Балансировка также реализуется иначе. В кролике вы к одной очереди подключали несколько консьюмеров, и брокер сам
+раздавал события каждому из подписчиков.
 
-Вам придется писать очень много инфраструктурного кода, ибо библиотека от Confluent - нищая.
-Более того:
-- О каких обменниках и очередях идет речь? Тут у нас только топики и партиции `[круиз контроль? у нас только буксир есть]`
-- Никто тебе не скажет, что сообщение пришло в партицию, сам приходи и спрашивай `[глохнет, когда трогаешься с места? у нас карбюратор, качай икры]`
-- Если хочешь запаблишить сообщение, будь добр указать, по какой стратегии оно должно зароутиться в нужный partition `[робот/вариатор/акпп? не, не слышали, у нас расход бензина меньше]`
-- Очень сложен в настройке для DevOps-ов, легко положить прод из-за ошибки в конфиге `[полное внимание на КПП/педали/знаки на дороге/светофоры/сигналы]`
+В кафке же отсутсвует понятие `очередь`, есть только `топики` и `партиции`.
 
-Однако бэхе уже более 20 лет, и она не ломается (в отличие от современного аналога), потому что все устроенно просто и топорно. Прям как в Kafka.
+> Максимальное кол-во консьюмеров для одного топика равно количеству партиций.
 
-> #### Оффтоп для девочек
-Представьте, что у вас стайлер Dyson (напичканный электроникой для упрощения сушки и укладки волос), который
-можно использовать как фен для сушки волос без экстремальных температур, щетку-брашинг, плойку, утюжок для выпрямления волос, инструмент создания объема и средство для раглаживания пушистости.
-И притом можно работать 1-й рукой и подключить его к приложению.
+То есть вам надо сразу закладывать такое кол-во партиций, которое удовлетворит вашу будущую нагрузку.
 
-Так вот. Пересаживание с RabbitMQ на Kafka - это то же самое, как пересесть с Dyson на
-старый фен 90-х годов, в котором из простого - это воткнуть вилку в розетку.
+Вы можете спросить: `а почему я не могу подключить к 10 партициям 20 консьюмеров?`
 
-Вам придется писать очень много инфраструктурного кода, ибо библиотека от Confluent - нищая.
-Более того:
-- О каких обменниках и очередях идет речь? Тут у нас только топики и партиции `[сушка/укладка/выравнивание/создание объема? у нас только сушка/сушка/сушка/сушка]`
-- Никто тебе не скажет, что сообщение пришло в партицию, сама приходи и спрашивай `[долго сушатся волосы? ну помоги расческой, чтобы корни просушились]`
-- Если хочешь запаблишить сообщение, будь добра указать, по какой стратегии оно должно зароутиться в нужный partition `[разные режимы работы? у нас только вкл/выкл есть]`
-- Очень сложен в настройке для DevOps-ов, легко положить прод из-за ошибки в конфиге `[если уронить фен в воду, случится короткое замыкание]`
+Ответ: `можно хоть 10 консьюмеров на партицию, а толку?`
 
-Однако этому фену уже 20 лет и он ни разу не ломался (в отличие от современного аналога), потому что все устроенно просто и топорно. Прям как в Kafka.
+Кафка гарантирует очередность сообщений, поэтому если у вас 2 консьюмера читают одну и ту же партицию,
+то пока первый не вызвал `commit`, второй ничего не получит в обработку.
+То есть у вас всегда один из консьюмеров простаивает. Тогда смысл его поднимать?
 
-#
-Погнали?
-А вот и офф. сайт подьехал
-https://kafka.apache.org
+Погнали дальше делать HighLoad!
 
-> НЕ РЕКЛАМА!
+1. Для начала давайте рассмотрим бОльшую часть настроек продьюсера:
+   Основные настройки надежности
+- `EnableIdempotence` — гарантирует, что сообщения будут доставлены ровно один раз в правильном порядке. При значении true автоматически настраиваются: max.in.flight.requests.per.connection=5, retries=INT32_MAX и acks=all.
+- `MessageSendMaxRetries` — количество попыток повторной отправки при ошибке (по умолчанию 2147483647). Повторные попытки могут нарушить порядок сообщений, если не включена идемпотентность.
+- `MessageTimeoutMs` — максимальное время ожидания успешной доставки сообщения в миллисекундах (по умолчанию 300000). Это общий таймаут для всех попыток доставки, включая повторы.
+- `BatchSize` — максимальный размер пакета сообщений в байтах. Больший размер батча улучшает производительность за счет меньшего количества запросов.
+- `LingerMs` — задержка в миллисекундах перед отправкой батча для накопления большего количества сообщений (по умолчанию 5). Увеличение значения улучшает сжатие и производительность, но увеличивает латентность.
+- `BatchNumMessages` — максимальное количество сообщений в одном батче (по умолчанию 10000).
+- `QueueBufferingMaxMessages` — максимальное количество сообщений в очереди продюсера (по умолчанию 100000). Эта очередь общая для всех топиков и партиций.
+- `QueueBufferingMaxKbytes` — максимальный размер очереди в килобайтах (по умолчанию 1048576). Этот параметр имеет приоритет над QueueBufferingMaxMessages.
+- `QueueBufferingBackpressureThreshold` — порог неотправленных запросов для создания обратного давления (по умолчанию 1). Меньшее значение создает более крупные и эффективные батчи.
+- `CompressionType` — тип сжатия для всех данных: none, gzip, snappy, lz4, zstd (по умолчанию none). Сжатие работает на уровне батчей, поэтому эффективность зависит от размера батча.
+- `CompressionLevel` — уровень сжатия для выбранного алгоритма (значения зависят от алгоритма).
+- `Partitioner` — стратегия распределения сообщений по партициям. Доступные варианты: random, consistent, consistent_random (по умолчанию), murmur2, murmur2_random, fnv1a, fnv1a_random.
+- `StickyPartitioningLingerMs` — задержка для назначения sticky-партиций сообщениям без ключа (по умолчанию 10).
+- `RequestTimeoutMs` — таймаут подтверждения запроса продюсера брокером в миллисекундах (по умолчанию 30000).
+- `EnableGaplessGuarantee` — экспериментальная настройка для предотвращения пропусков в последовательности сообщений (требует EnableIdempotence=true).
 
-Вообще рекомендую ознакомиться с продуктами фонда Apache, ребята делают очень много крутых вещей. И притом распространяют их бесплатно.
-В множестве вакансиий могут присутствовать требования к знаниям продуктов Apache, вот некоторые из них:
-- Kafka
-- Zookeeper
-- Hadoop
-- Spark
-- Hive
-- HBase
-- Cassandra
-- Airflow
-- Lucene
+2. При высокой нагрузке рекомендуется устанавливать следующие параметры:
+- `BatchSize` - больший размер батча уменьшает количество сетевых запросов и повышает throughput за счет объединения большего количества сообщений в одну отправку.
+- `LingerMs` рекомендуется установить в диапазоне 10-50 миллисекунд вместо дефолтного 0. Эта небольшая искусственная задержка позволяет накопить больше сообщений в батче, существенно повышая пропускную способность при незначительном росте latency.
+- `BatchNumMessages` можно увеличить с дефолтных 10000 до 50000-100000 для потоков с высокой частотой генерации сообщений.
+- `CompressionType` - на выбор snappy/lz4/zstd. Баланс обеспечивает последний кандидат, т.к. тут высокий уровень компрессии и неплохая скорость сжатия и распаковки (около 1 ГБ/с)
+- `MaxInFlight` - целое число, определяющее кол-во параллельных отправок в брокер. Значения больше 1 могут нарушить порядок сообщений при повторных попытках, поэтому для процессов, требующих строгой упорядоченности, следует оставить значение 1 или включить идемпотентность.
+- `Acks` - подтверждение только от лидера или от всех реплик брокера. При первом варианте возможны потери сообщений, но повышается пропускная способность, поэтому для процессов, требующих гарантий, следует оставить значение 2 (подтверждение от всех реплик) или включить идемпотентность.
+- `QueueBufferingMaxMessages` - рекомендуется увеличить до 500000-1000000 для высоконагруженных приложений. Это позволяет продюсеру аккумулировать больше сообщений при временных всплесках нагрузки без блокировки.
 
-Если вы джавист/котлинист, то вы точно знакомы с:
-- Tomcat
-- Ant
-- Maven
-- NetBeans
+> Огромная нагрузка: BatchSize=131072, LingerMs=20-50, CompressionType=Lz4, Acks=Leader, MaxInFlight=5-10, QueueBufferingMaxMessages=500000
 
-И это тоже сделали они. У ребят 320+ проектов, которые они продолжают развивать.
+> Надежность: BatchSize=65536, LingerMs=5, CompressionType=Snappy, Acks=All, EnableIdempotence=true, MaxInFlight=1, MessageSendMaxRetries=100000, RetryBackoffMs=1000, MessageTimeoutMs=120000
 
-1. У кафки нет встроенной админки, поэтому поднимем два контейнера в `docker-compose.yml`:
-```yaml
-services:
-  # ...
-  # тут ваша секция про postgres и pgbouncer
-  # ...
-  kafka:
-    image: apache/kafka:4.0.0
-    restart: always
-    container_name: kafka
-    ports:
-      - "9092:9092"
-      - "9093:9093"
-    environment:
-      - KAFKA_NODE_ID=1
-      - KAFKA_PROCESS_ROLES=broker,controller
-      - KAFKA_LISTENERS=PLAINTEXT://:29092,CONTROLLER://:9093,EXTERNAL://:9092
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
-      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
-      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
-      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
-      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
-      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
-      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
-      - KAFKA_LOG_DIRS=/var/lib/kafka/data
-      - CLUSTER_ID=universe-labs-cluster
-    volumes:
-      - ./kafka-data:/var/lib/kafka/data
+> Баланс: BatchSize=65536, LingerMs=10, CompressionType=Zstd, Acks=All, EnableIdempotence=true, MaxInFlight=5
 
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    restart: always
-    container_name: kafka-ui
-    ports:
-      - "8180:8080"
-    depends_on:
-      - kafka
-    environment:
-      - KAFKA_CLUSTERS_0_NAME=local
-      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:29092
+Также для баланса и для надежности необходимо в параметрах создания топика задать min.insync.replicas >= 2 и replication factor = 3, иначе Acks=All не несет никакой смысловой нагрузки.
+Однако в нашем лабораторном случае используется всего лишь 1 брокер, поэтому replication factor = 3 мы установить не сможем. Обычно установкой таких вещей занимаются DevOps-ы.
+Мы же будем устанавливать min.insync.replicas = 2, replication factor = 1.
 
-volumes:
-  pgdata:
-  kafka_data:
+3. Создаем (или удаляем имеющиеся и создаем новые) топики `oms_order_created` и `oms_order_status_changed`.
+   В каждом топике задаем 3 партишна и min.insync.replicas = 2, replication factor = 1.
+
+4. В настройках продьюсера в файле `KafkaProducer.cs` зададим новые настройки (уберем автокоммит):
+```csharp
+var config = new ProducerConfig
+{
+    BootstrapServers = kafkaSettings.Value.BootstrapServers,
+    ClientId = kafkaSettings.Value.ClientId,
+    CompressionType = CompressionType.Snappy,
+    Partitioner = Partitioner.Consistent,
+    Acks = Acks.All,
+    EnableIdempotence = true,
+    LingerMs = 5,
+    BatchSize = 16384,
+    MaxInFlight = 1
+};
 ```
 
-Видите, как много настроек у кафки? Лучше почитать про наиболее популярные настройки,
-чтобы понимать, как с ней работать с точки зрения бэкэнда. https://hub.docker.com/r/bitnami/kafka#:~:text=compose%20up%20%2Dd-,Configuration,-Environment%20variables
+> Вынесите все эти параметры в `KafkaSettings.cs` и заполните их в `appsettings.Development.json`.
 
-Секцию с RabbitMQ можно удалить.
-
-2. Поднимем контейнеры и посмотрим в UI по адресу `http://localhost:8180/`
-   ![admin1.png](admin1.png)
-
-Сейчас у нас нет топиков и консьюмеров, поэтому в соответствующих секциях ничего нет.
-
-Далее работаем с проектом `UniverseLabs.Oms`.
-3. Удаляем нугет пакет RabbitMQ.Client и устанавливаем новый пакет Confluent.Kafka 2.11.1 или выше.
-4. Удаляем класс `RabbitMqSettings.cs`, секции в `appsettings.Development.json`/`appsettings.Production.json`,
-   `RabbitMqService.cs`.
-5. Добавляем новый класс в папку Config `KafkaSettings.cs`:
+5. Теперь давайте замерим производительность наших пушей. Для начала изменим `OrderGenerator.cs`.
+   Сейчас там создается 50 заказов и делается по ним инсерт, а далее апдейт. Давайте создадим 500 заказов, далее в цикле от 0 до 200
+   будем делать инсерт этих самых 500 заказов без задержек. Необходимо, чтобы в топике появилось 100 000 событий.
+   Также необходимо замерить время выполнения всех этих пушей, для этого в C# есть класс Stopwatch:
 ```csharp
-public class KafkaSettings
-{
-    public string BootstrapServers { get; set; }
+var sw = new Stopwatch();
+sw.Start();
 
-    public string ClientId { get; set; }
-    
-    public string OmsOrderCreatedTopic { get; set; }
-    
-    public string OmsOrderStatusChangedTopic { get; set; }
+for (var i = 0; i < 200; i++)
+{
+    await orderService.BatchInsert(orders, stoppingToken);
 }
+
+Console.WriteLine(sw.Elapsed);
+```
+После инсерта 100 000 заказов в консоль будет выведено время.
+У меня это время было равно `9 секунд 647 мс`.
+
+6. Теперь поменяем конфигурацию. Опять же в настройках продьюсера в файле `KafkaProducer.cs` зададим новые настройки:
+```csharp
+var config = new ProducerConfig
+{
+    BootstrapServers = kafkaSettings.Value.BootstrapServers,
+    ClientId = kafkaSettings.Value.ClientId,
+    CompressionType = CompressionType.Snappy,
+    Partitioner = Partitioner.Consistent,
+    Acks = Acks.All,
+    LingerMs = 10,
+    BatchSize = 65536,
+    EnableIdempotence = true,
+    MaxInFlight = 5
+};
 ```
 
-6. Добавляем новую секцию в `appsettings.Development.json`:
-```json
-{
-  "KafkaSettings": {
-    "BootstrapServers": "localhost:9092",
-    "ClientId": "universe-labs-oms",
-    "OmsOrderCreatedTopic": "oms_order_created",
-    "OmsOrderStatusChangedTopic": "oms_order_status_changed"
-  }
-}
- ```
+> Вынесите новые параметры также в `KafkaSettings.cs` и заполните их в `appsettings.Development.json`.
 
-7. Пишем кафка-продьюсера:
+7. Запускаем приложение и замеряем время. В моем случае было `7 секунд 318 мс`. Ускорение на **20-25%** благодаря увеличению `BatchSize/LingerMs/MaxInFlight` достигнуто.
+
+8. Реализуем интерфейс IDisposable для `KafkaProducer.cs`. В конце класса добавим методы для очистки ресурсов:
 ```csharp
-public class KafkaProducer
+
+public class KafkaProducer: IDisposable
 {
     private readonly IProducer<string, string> _producer;
-    
-    public KafkaProducer(IOptions<KafkaSettings> kafkaSettings)
+    // ...
+    // Тут основной код продьюсера
+    // ...
+
+    private bool _disposed;
+
+    public void Dispose()
     {
-        var config = new ProducerConfig
-        {
-            BootstrapServers = kafkaSettings.Value.BootstrapServers,
-            ClientId = kafkaSettings.Value.ClientId,
-            LingerMs = 100,
-            CompressionType = CompressionType.Snappy,
-            Partitioner = Partitioner.Consistent
-        };
-        
-        _producer = new ProducerBuilder<string, string>(config).Build();
+        if (_disposed) return;
+        _disposed = true;
+
+        Dispose(true);
+        GC.SuppressFinalize(this);
     }
 
-    public async Task Produce<T>(string topic, (string key, T message)[] messages, CancellationToken token)
+    protected virtual void Dispose(bool disposing)
     {
-        var tasks = messages.Select(async message =>
+        if (!disposing)
         {
-            try
-            {
-                return await _producer.ProduceAsync(topic, 
-                    new Message<string, string>
-                    {
-                        Key = message.key,
-                        Value = message.message.ToJson()
-                    }, token);
-            }
-            catch (ProduceException<string, string> ex)
-            {
-                Console.WriteLine($"Failed to send message: {ex.Error.Reason}");
-                return null;
-            }
-        });
-
-        var results = await Task.WhenAll(tasks);
-        
-        if (results.Any(x => x is null))
-        {
-            throw new Exception("Failed to produce messages");
+            return;
         }
-    }
-}
-```
-
-> NB! ProducerConfig имеет массу настроек, которые влияют как, когда и куда будет публиковаться событие. Сейчас у нас большинство настроек выбраны по умолчанию.
-
-Пройдемся по имеющимся:
-- BootstrapServers - адрес брокера кафки
-- ClientId - идентификатор клиента
-- LingerMs - время ожидания перед отправкой батча (ждем 100 мс, если батч заполнился раньше - пушим его в кафку, если нет - пушим, что есть)
-- CompressionType - тип сжатия (Snappy более-менее оптимальный)
-- Partitioner - стратегия разбиения по партициям, всегда по ключу (в нашем случае берется консистентый хэш ключа)
-
-Если ключ один и тот же для двух сообщений, то они гарантировано попадут в одну партицию.
-
-8. Можем удалить RoutingKey из событий, т.к. он больше не используется.
-9. Зарегистрируем зависимости в `Program.cs`.
-10. Перепишем сам паблиш в OrderService.cs. Только теперь надо прокинуть ключ
-    для каждого события, рекомендую взять за ключ `CustomerId`, чтобы события по заказам
-    одного и того же пользователя попадали в одну партицию. Это нужно, чтобы не потерять очередность,
-    и чтобы один и тот же консьюмер читал события по этому пользователю.
-11. Перепишем `OrderGenerator.cs`. Пусть теперь он берет CustomerId из определенного пула размером, например, 5 айдишников.
-12. Теперь в Kafka UI создадим топики `oms_order_created` и `oms_order_status_changed` c такими параметрами:
-    ![create_topic.png](create_topic.png)
-
-
-13. Запустим приложение и посмотрим в Kafka UI на топик `oms_order_created`.
-    ![admin2.png](admin2.png)
-    ![admin3.png](admin3.png)
-
-
-14. Все работает, как мы и хотели, сообщения с одинаковыми ключами попадают в одну и ту же партицию.
-15. В проекте UniverseLabs.Oms.Consumer удаляем нугет пакет RabbitMQ.Client и устанавливаем новый пакет Confluent.Kafka 2.11.1 или выше.
-16. Удаляем класс `RabbitMqSettings.cs`, секции в `appsettings.Development.json`/`appsettings.Production.json`
-17. Пишем новый KafkaSettings.cs:
-```csharp
-public class KafkaSettings
-{
-    public string BootstrapServers { get; set; }
-    
-    public string GroupId { get; set; }
-    
-    public string OmsOrderCreatedTopic { get; set; }
-    
-    public string OmsOrderStatusChangedTopic { get; set; }
-}
-```
-
-18. Добавляем новую секцию в `appsettings.Development.json`:
-```json
-{
-  "KafkaSettings": {
-    "BootstrapServers": "localhost:9092",
-    "GroupId": "universe-labs-oms-consumer",
-    "OmsOrderCreatedTopic": "oms_order_created",
-    "OmsOrderStatusChangedTopic": "oms_order_status_changed"
-  }
-}
-```
-
-19. Пишем новый базовый консьюмер `BaseKafkaConsumer.cs`:
-```csharp
-public abstract class BaseKafkaConsumer<T>: IHostedService
-    where T : class
-{
-    private readonly IConsumer<string, string> _consumer;
-    private readonly ILogger<BaseKafkaConsumer<T>> _logger;
-    private readonly string _topic;
-    
-    protected BaseKafkaConsumer(
-        IOptions<KafkaSettings> kafkaSettings,
-        string topic,
-        ILogger<BaseKafkaConsumer<T>> logger)
-    {
-        var config = new ConsumerConfig
-        {
-            BootstrapServers = kafkaSettings.Value.BootstrapServers,
-            GroupId = kafkaSettings.Value.GroupId,
-            AutoOffsetReset = AutoOffsetReset.Latest,
-            EnableAutoCommit = true,
-            AutoCommitIntervalMs = 5_000,
-            SessionTimeoutMs = 60_000,
-            HeartbeatIntervalMs = 3_000,
-            MaxPollIntervalMs = 300_000
-        };
-
-        _logger = logger;
-        _topic = topic;
-        _consumer = new ConsumerBuilder<string, string>(config).Build();
-    }
-    
-    public async Task StartAsync(CancellationToken cancellationToken)
-    {
-        await StartConsuming(_topic, cancellationToken);
-    }
-
-    public Task StopAsync(CancellationToken cancellationToken)
-    {
-        StopConsuming();
-        return Task.CompletedTask;
-    }
-
-    private async Task StartConsuming(string topic, CancellationToken cancellationToken)
-    {
-        _consumer.Subscribe(topic);
-        _logger.LogInformation($"Started consuming from topic: {topic}");
-
+        
         try
         {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                var consumeResult = _consumer.Consume(cancellationToken);
-
-                var msg = new Message<T>
-                {
-                    Key = consumeResult.Message.Key,
-                    Body = consumeResult.Message.Value.FromJson<T>()
-                };
-                
-                if (consumeResult.Message != null)
-                {
-                    try
-                    {
-                        await ProcessMessage(msg, cancellationToken);
-                        _consumer.Commit(consumeResult);
-                    }
-                    catch (Exception e)
-                    {
-                        _logger.LogError(e, "Error processing message");
-                    }
-                }
-            }
+            _producer.Flush(); 
+            _producer.Dispose();
         }
-        catch (OperationCanceledException)
+        catch (Exception e)
         {
-            _logger.LogInformation("Consumer cancelled");
-        }
-        catch (ConsumeException ex)
-        {
-            _logger.LogError(ex, "Consume error occurred");
-        }
-        finally
-        {
-            StopConsuming();
+            // ignore
         }
     }
-    
-    private void StopConsuming()
-    {
-        _logger.LogInformation($"Stopping consuming from topic: {_topic}");
-        _consumer.Close();
-        _consumer.Dispose();
-    }
-
-    protected abstract Task ProcessMessage(Message<T> message, CancellationToken token);
-}
 ```
 
-20. Класс `MessageInfo.cs` переименуйте в `Message.cs`:
+Что нам это дает? В случае редеплоя или окончания http-реквеста скоуп заканчивается и объект удаляется из памяти.
+Перед его удалением, необходимо допушить все события в брокер, чтобы ничего не потерялось.
+
+9. Теперь проведем эксперимент по сжатию.
+   Для начала удалим и создадим топики заново. Оставим всё как есть и запустим наше приложение.
+   По моим замерам вышло чуть более 7 секунд (7.318) и 18 МБ - размер топика `oms_order_created`.  
+   Размер топика можно подсмотреть в разделе Topic в Kafka UI.
+10. Поменяем тип сжатия на Lz4. Удалим и создадим топики заново. Запустим приложение.
+    По моим замерам вышло чуть более 7 секунд (7.424) и 17 МБ - размер топика `oms_order_created`.
+    Да, мы чутка проиграли в скорости (1%), но выиграли по памяти более 5%.
+
+11. Еще раз поменяем тип сжатия, на этот раз Zstd. Удалим и создадим топики заново. Запустим приложение.
+    По моим замерам вышло чуть более 7 секунд (7.532) и 9 МБ - размер топика `oms_order_created`.
+    По сравнению с Lz4 или Snappy проигрыш по времени не критичен, мы можем простить эти 1-2%.
+    Однако по памяти выигрыш почти в 2 раза, что не может не радовать отделы DevOps и SRE.
+
+12. Теперь перейдем к настройкам консьюмера. Вот основные:
+- `BootstrapServers` — список адресов Kafka-брокеров для первоначального подключения (например, "localhost:9092"). Это обязательный параметр для установления соединения с кластером.
+- `GroupId` — идентификатор consumer group, к которой принадлежит консьюмер. Все консьюмеры с одинаковым GroupId образуют группу и совместно обрабатывают партиции топика, обеспечивая распределение нагрузки. Это критически важный параметр для координации работы нескольких консьюмеров.
+- `ClientId` — произвольный идентификатор клиента для логирования и метрик. Помогает отслеживать активность конкретного консьюмера в логах брокера.
+- `AutoOffsetReset` — определяет поведение при отсутствии сохраненного офсета или если офсет стал невалидным. Значение Earliest начинает чтение с самого начала топика, Latest — только с новых сообщений, Error — выбрасывает исключение.
+- `EnableAutoCommit` — автоматически фиксирует офсеты в фоновом потоке через определенные интервалы (по умолчанию true). При значении true консьюмер периодически коммитит офсеты в Kafka без явных вызовов из кода.
+- `AutoCommitIntervalMs` — интервал в миллисекундах между автоматическими коммитами офсетов (по умолчанию 5000). Работает только при EnableAutoCommit=true.
+- `EnableAutoOffsetStore` — автоматически помечает офсет готовым к коммиту сразу перед вызовом Consume (по умолчанию true). При включенной настройке офсет сохраняется до обработки сообщения, что может привести к потере сообщений при сбое.
+- `SessionTimeoutMs` — таймаут сессии консьюмера в миллисекундах (по умолчанию 10000). Если брокер не получает heartbeat в течение этого времени, он считает консьюмер недоступным и запускает ребалансировку партиций.
+- `HeartbeatIntervalMs` — интервал между heartbeat-сообщениями координатору consumer group (по умолчанию 3000). Обычно устанавливается в треть от SessionTimeoutMs.
+- `MaxPollIntervalMs` — максимальный интервал между вызовами Consume() (по умолчанию 300000). Если консьюмер не вызывает Consume() в течение этого времени, он считается неактивным и исключается из группы.
+
+Стратегии обработки событий:
+- `At-Most-Once` (максимум один раз) достигается при дефолтной конфигурации с EnableAutoCommit=true и EnableAutoOffsetStore=true. В этом случае офсет коммитится до завершения обработки, и при сбое сообщение может быть потеряно.
+- `At-Least-Once` (минимум один раз) требует ручного управления коммитами. Установите EnableAutoCommit=false и вызывайте Commit() только после успешной обработки сообщения. При сбое сообщение может быть обработано повторно.
+- `Exactly-Once` (ровно один раз) для stream processing (kafka → kafka) доступна начиная с версии 1.4 при использовании транзакций
+
+Нас интересует 2-й вариант - At Least Once.
+
+13. В проекте с косьюмером зададим параметры для ConsumerConfig-a в `BaseBatchKafkaConsumer.cs`:
 ```csharp
-public class Message<T>
+var config = new ConsumerConfig
 {
-    public string Key { get; set; }
-    
-    public T Body { get; set; }
-}
+    BootstrapServers = kafkaSettings.Value.BootstrapServers,
+    GroupId = kafkaSettings.Value.GroupId,
+    AutoOffsetReset = AutoOffsetReset.Latest,
+    EnableAutoCommit = false,
+    SessionTimeoutMs = 60_000,
+    HeartbeatIntervalMs = 3_000,
+    MaxPollIntervalMs = 300_000
+};
 ```
 
-21. Теперь перепишите консьюмеры `OmsOrderCreatedConsumer.cs` и `OmsOrderStatusChangedConsumer.cs`, учтите, что они не батчевые.
-22. Также не забудьте добавить в `Program.cs` следующий код - это позволит запустить консьюмеры параллельно:
-```csharp
-builder.Services.Configure<HostOptions>(options =>
-{
-    options.ServicesStartConcurrently = true;
-    options.ServicesStopConcurrently = true;
-});
-```
-22. Запустите проект и посмотрите в UI спустя пару минут. Откройте вкладку Consumers и убедитесь, что консьюмер с названием universe-labs-oms-consumer подключился к очереди.
-    ![consumer.png](consumer.png)
+Также не забываем вызвать `_consumer.Commit(last);` после успешной обработки событий.
+last - это последнее сообщение в батче (его надо запомнить во время консьюма событий из брокера).
 
-Видите в топике `oms_order_created` лаг? Это значит, что консьюмер не успевает за продьюсером.
+> Вынесите все параметры для ConsumerConfig в `KafkaSettings.cs` и заполните их в `appsettings.Development.json`.
 
-23. Самостоятельно пишем батчевый вариант. Начинаем с `BaseBatchKafkaConsumer.cs`. Заканчиваем
-    `BatchOmsOrderCreatedConsumer.cs` и `BatchOmsOrderStatusChangedConsumer.cs`.
-    Не забудьте в конфиге задать `CollectBatchSize` и `CollectTimeoutMs`.
 
-24. Когда вы напишете батчевые консьюмеры, обратите внимание, как быстро они будут разгребать лаг.
-    Мой эксперимент показал, что лаг в 100 000 сообщений батчевый консьюмер с параметрами
-```json
-{
-  "CollectBatchSize": 100,
-  "CollectTimeoutMs": 500
-}
-```
-разгреб за 40 секунд. По сравнению с кроликом - это очень быстро.
+14. Теперь давайте понагружаем наше приложение. У нас есть `OrderGenerator.cs`. Он делал до сегодняшней лабы Insert 50 заказов, потом ждал 100 мс
+    и делал апдейт статусов нескольких заказов. Потом ждал 250 мс и шел на второй круг.
+    Давайте немножно это подтюним. Вернем всё как было ДО и начнем делать батчевый инсерт 1000 заказов, потом будет апдейт без задержки.
+    И после чего пойдем на второй круг.
+
+После чего запускаем приложения (и сервис, и консьюмер) и видим, как растет лаг.
+![lag.png](lag.png)
+
+15. Давайте создадим топики с Number of Partitions = 3, Min In Sync Replicas = 2, Replication Factor = 1.
+    Теперь можно честно сделать скейлинг консьюмеров.
+16. Запускаем приложения (и сервис, и консьюмера), далее скейлим консьюмера до 3-х штук.
+    Если вы запускаете в докере (через `docker-compose.yml`), то можно вызвать команду
+
+`docker compose up --scale universe-labs-consumer=3 -d`
+
+> NB! Если чувствуете, что ваши консьюмеры все равно не справляются, то увеличьте CollectBatchSize для них.
+
+> NB! Может быть такое, что на вашем ноутбуке выдано слишком мало CPU/MEM для докера. Выставите значение побольше, чтобы контейнеры обслуживались без задержек.
